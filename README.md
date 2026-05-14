@@ -1,121 +1,102 @@
 # Lark-Claude-Bot
 
-> **⚠️ Showcase Repository** — Core implementation not included. This demonstrates the architecture and design decisions. The open-source version is at [github.com/ofoxai/lark-claude-bot](https://github.com/ofoxai/lark-claude-bot).
+> ⚠️ Showcase Only — Core implementation not included.
 
-A **Feishu / Lark bot** framework powered by **Claude Code CLI** — real-time progress cards, session persistence, cron scheduling, auto self-repair, and API key security filter.
+**Marvin** is a Feishu/Lark bot framework that wires the [Claude Code CLI](https://github.com/anthropics/claude-code) into a group-chat-native task runner. It turns any Lark conversation into a persistent, observable, self-repairing AI agent.
 
-Named after Marvin, the paranoid android from *The Hitchhiker's Guide to the Galaxy*: deeply unimpressed by everything, yet terrifyingly capable.
+The name is a nod to Marvin the Paranoid Android from *The Hitchhiker's Guide to the Galaxy*.
+
+A community open-source version is maintained at [github.com/ofoxai/lark-claude-bot](https://github.com/ofoxai/lark-claude-bot).
 
 ---
 
-## Architecture
+## How It Works
 
 ```
-                  ┌──────────────────────┐
-                  │    Claude Code CLI   │
-                  └──┬───────────────┬───┘
-                     │               │
-              prompt │    stream     │ events
-                     │               │
-  ┌──────────┐   ┌───┴───────────────┴───┐   ┌──────────┐
-  │   Lark   │──▶│       handler.ts      │──▶│ Progress │
-  │ WebSocket│   └───────────────────────┘   │   Card   │
-  └──────────┘               ▲               └──────────┘
-                             │
-                    ┌────────┴────────┐
-                    │  Cron Scheduler │
-                    │   tasks.json    │
-                    └─────────────────┘
+Lark user message
+       │
+       ▼
+  WebSocket listener  (lark.ts)
+       │
+       ▼
+  Message handler     (handler.ts)
+       │  ┌─────────────────────────────────────┐
+       ▼  ▼                                     │
+  Task executor       (taskExecutor.ts)         │
+       │                                        │
+       ▼                                        │
+  Claude Code CLI     (claude.ts)               │ self-repair
+       │                                        │ loop
+       ▼                                        │
+  Safety filter       (safety.ts) ─────────────┘
+       │
+       ▼
+  Progress card update (lark.ts / send.ts)
+       │
+       ▼
+  Lark card / plain text reply
 ```
+
+## Key Features
+
+### Real-Time Progress Cards
+Task state is surfaced live in the chat thread:
+
+| State | Indicator |
+|---|---|
+| Queued | ⬜ |
+| Running | 🔄 |
+| Done | ✅ |
+| Failed | ❌ |
+
+### Session Persistence
+Conversation context is serialized to disk (`chatStore.ts`, `memory.ts`), surviving process restarts without losing thread continuity.
+
+### Admin Controls
+Admins can interrupt a running task mid-execution and trigger a clean recovery path, preventing runaway jobs.
+
+### Cron Scheduler
+A built-in scheduler (`scheduler.ts`) fires on a 60-second tick and accepts standard 5-field cron expressions for recurring tasks.
+
+### Two-Phase Pipeline
+Every task goes through:
+1. **Execute** — Claude Code CLI performs the work.
+2. **Summarize** — A second pass condenses output to a human-readable summary card.
+
+### Auto Self-Repair
+On failure, the executor automatically retries with additional context before surfacing the error to the user.
+
+### Security Filter
+`safety.ts` scrubs all Claude output before it reaches Lark — stripping API keys, bearer tokens, and IP addresses regardless of where they appear in the response.
 
 ## Source Structure
 
 ```
 src/
-├── main.ts          # Entry: WebSocket + scheduler + auto-recover
-├── config.ts        # Environment variables and paths
-├── handler.ts       # Message routing, progress cards, interruption recovery
-├── claude.ts        # Claude Code CLI wrapper (stream-json, activity timeout)
-├── lark.ts          # Lark API: send text / card / progress card / reaction
-├── scheduler.ts     # Cron engine: 60s tick, expression matching, execution lock
-├── taskExecutor.ts  # Two-phase pipeline: execute → summarize (+ auto-repair)
-├── taskCommands.ts  # Task list injection into Claude context
-├── chatStore.ts     # JSONL message persistence (per-group storage)
-├── memory.ts        # Conversation history + memory update instructions
-├── safety.ts        # Output filtering + audit log
-├── trigger.ts       # CLI tool: manually trigger a task
-└── send.ts          # CLI tool: manually send a message
+├── main.ts            # Entry point, process lifecycle
+├── config.ts          # Env vars and runtime config
+├── handler.ts         # Incoming message routing
+├── claude.ts          # Claude Code CLI wrapper
+├── lark.ts            # Lark WebSocket client + card renderer
+├── send.ts            # Outbound message helpers
+├── scheduler.ts       # Cron scheduler (60s tick)
+├── taskExecutor.ts    # Execute → summarize pipeline
+├── taskCommands.ts    # Built-in slash commands
+├── chatStore.ts       # Per-thread session storage
+├── memory.ts          # Long-term memory layer
+├── safety.ts          # Output security filter
+└── trigger.ts         # Event trigger definitions
 ```
 
-## Key Features
+## Stack
 
-| Feature | Description |
-|---------|-------------|
-| **Real-time Progress Cards** | Live task list with ⬜→🔄→✅ status in group chat |
-| **Session Persistence** | Sessions saved to disk, auto-recovered after restart |
-| **Admin Interrupt** | Admin can interrupt mid-execution with full context recovery |
-| **Cron Scheduler** | Standard 5-field cron, 60s resolution, jitter support |
-| **Auto Self-Repair** | On failure: diagnose → classify → attempt fix |
-| **Security Filter** | Strips API keys, tokens, internal IDs, private IPs from all output |
-| **Multi-format Input** | Text, rich text, images, files — auto-downloaded for Claude |
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
+| Component | Technology |
+|---|---|
 | Runtime | Node.js 20+ |
 | Language | TypeScript |
-| AI Backend | Claude Code CLI (`--print --output-format stream-json`) |
-| Messaging | Lark WebSocket API (no public IP required) |
-| Scheduling | Custom cron engine (60s tick) |
-| Persistence | JSONL files (messages) + JSON (tasks) |
+| AI engine | `@anthropic-ai/claude-code` (Claude Code CLI) |
+| Chat platform | Feishu / Lark (WebSocket API) |
 
-## Message Processing Flow
+## Status
 
-```
-Lark WebSocket event
-    → Dedup (in-memory Set, max 5000)
-    → Store message (per-group JSONL)
-    → Group message without @bot → skip
-    → Concurrency check → admin can interrupt active task
-    → Download images/files to /tmp/
-    → Build context: recent messages + task list + history
-    → Claude Code CLI (--print --output-format stream-json)
-    → Push real-time progress card (task list + current action)
-    → Security filter (strip keys, tokens, IDs, IPs)
-    → Update progress card with final result
-    → Fallback to plain text if card fails
-```
-
-## Cron Task Definition
-
-```json
-{
-  "tasks": [
-    {
-      "id": "daily-report",
-      "name": "Daily Report",
-      "prompt": "Generate today's work summary...",
-      "cron": "0 9 * * 1-5",
-      "jitterMinutes": 5,
-      "chatId": "oc_xxxx",
-      "status": "active"
-    }
-  ]
-}
-```
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `LARK_APP_ID` | ✅ | Lark App ID |
-| `LARK_APP_SECRET` | ✅ | Lark App Secret |
-| `LARK_ENCRYPT_KEY` | ❌ | Event encryption key |
-| `LARK_DOMAIN` | ❌ | Set to `feishu` for China domain |
-| `ADMIN_OPEN_ID` | ❌ | Admin open_id for interrupt control |
-| `CLAUDE_TIMEOUT_MS` | ❌ | Claude idle timeout (default: 600000) |
-
----
-
-*Open-source version: [github.com/ofoxai/lark-claude-bot](https://github.com/ofoxai/lark-claude-bot)*
+This repository showcases the architecture and design of the Marvin bot framework. The full production source is internal. See [github.com/ofoxai/lark-claude-bot](https://github.com/ofoxai/lark-claude-bot) for the open-source community edition.
